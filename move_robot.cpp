@@ -61,6 +61,29 @@ k4a_float3_t transform_coordinates(const k4a_float3_t &point, const k4a_float3_t
 }
 
 
+double calculate_hand_openness(const k4abt_skeleton_t &skeleton, KalmanFilter &kf_hand_openness)
+{
+    k4a_float3_t left_handtip_joint = skeleton.joints[K4ABT_JOINT_HANDTIP_LEFT].position;
+    k4a_float3_t left_thumb_joint = skeleton.joints[K4ABT_JOINT_THUMB_LEFT].position;
+
+    // distance between handtip and thumb
+    double dist = sqrt(pow(left_handtip_joint.xyz.x - left_thumb_joint.xyz.x, 2) +
+                       pow(left_handtip_joint.xyz.y - left_thumb_joint.xyz.y, 2) +
+                       pow(left_handtip_joint.xyz.z - left_thumb_joint.xyz.z, 2));
+
+    double max_distance = 180.00;
+    double raw_openness = dist / max_distance - 0.2;
+
+    // Clamping
+    double openness = std::max(0.0, std::min(1.0, raw_openness));
+
+    // Use Kalman filter to smooth the openness value
+    double smoothed_openness = kf_hand_openness.update(openness);
+
+    return smoothed_openness;
+}
+
+
 uint32_t update_kinect(k4a_device_t device, k4abt_tracker_t bodyTracker, k4abt_frame_t &body_frame)
 {
     k4a_capture_t capture = NULL;
@@ -132,6 +155,7 @@ double measurement_noise = 0.1;
 KalmanFilter kf_x(process_noise, measurement_noise, 0.0);
 KalmanFilter kf_y(process_noise, measurement_noise, 0.0);
 KalmanFilter kf_z(process_noise, measurement_noise, 0.0);
+KalmanFilter kf_hand_openness(process_noise, 0.03, 0.0);
 
 k4abt_tracker_t bodyTracker;
 k4a_calibration_t calibration;
@@ -147,6 +171,7 @@ spinner.start();
 
 moveit::planning_interface::MoveGroupInterface arm("panda_arm");
 moveit::planning_interface::MoveGroupInterface::Plan my_plan;
+moveit::planning_interface::MoveGroupInterface gripper("panda_hand");
 
 std::vector<geometry_msgs::Pose> waypoints;
 
@@ -163,6 +188,15 @@ while (ros::ok() && keep_running)
         k4a_float3_t spine_base = skeleton.joints[K4ABT_JOINT_SPINE_NAVEL].position;
 
         k4a_float3_t left_wrist_ros = transform_coordinates(left_wrist_joint, spine_base);
+
+        // Inside the main loop
+        double hand_openness = calculate_hand_openness(skeleton, kf_hand_openness);
+        std::cout << "Left Hand Openness: " << hand_openness << std::endl;
+
+        std::vector<double> joint_values = {hand_openness * 0.04, hand_openness * 0.04};
+
+        gripper.setJointValueTarget(joint_values);
+        gripper.move();
 
         geometry_msgs::Point left_wrist_position;
         left_wrist_position.x = kf_x.update(left_wrist_ros.xyz.x);
