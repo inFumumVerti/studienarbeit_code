@@ -38,8 +38,6 @@ private:
     double P; // Uncertainty
 };
 
-
-
 const char *k4a_library_path = "/usr/lib/x86_64-linux-gnu/libk4a.so";
 volatile bool keep_running = true;
 
