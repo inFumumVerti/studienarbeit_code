@@ -7,6 +7,7 @@
 #include <chrono>
 #include <thread>
 #include <csignal>
+#include <kinectHandMovement/GloveData.h>
 
 class KalmanFilter {
 public:
@@ -38,8 +39,6 @@ private:
     double P; // Uncertainty
 };
 
-
-
 const char *k4a_library_path = "/usr/lib/x86_64-linux-gnu/libk4a.so";
 volatile bool keep_running = true;
 
@@ -60,6 +59,12 @@ k4a_float3_t transform_coordinates(const k4a_float3_t &point, const k4a_float3_t
     return new_coords;
 }
 
+void glove_data_callback(const my_package::GloveData::ConstPtr& msg)
+{
+    // Process the glove data here...
+}
+
+void compute
 
 uint32_t update_kinect(k4a_device_t device, k4abt_tracker_t bodyTracker, k4abt_frame_t &body_frame)
 {
@@ -126,6 +131,8 @@ if (result != K4A_RESULT_SUCCEEDED)
 
 k4a_device_start_cameras(device, &device_config);
 
+ros::Subscriber gripper_force_sub = nh.subscribe("gripper_force", 10, gripper_force_callback);
+
 // Create Kalman filters for wrist position
 double process_noise = 0.001;
 double measurement_noise = 0.1;
@@ -174,6 +181,12 @@ while (ros::ok() && keep_running)
                   << " y=" << left_wrist_position.y
                   << " z=" << left_wrist_position.z << std::endl;
 
+        std_msgs::Int32 force_msg;
+        force_msg.data = compute_gripper_force();
+        gripper_force_pub.publish(force_msg);
+
+        ros::Subscriber glove_data_sub = nh.subscribe("glove_data", 10, glove_data_callback);
+
         // Create and publish the 3D ball marker at the wrist position
         visualization_msgs::Marker marker = create_marker(left_wrist_position);
         marker_pub.publish(marker);
@@ -197,6 +210,7 @@ while (ros::ok() && keep_running)
         waypoints.clear();
     }
 
+    ros::spinOnce();
     k4abt_frame_release(body_frame);
 
 }
