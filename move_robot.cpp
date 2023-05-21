@@ -7,6 +7,8 @@
 #include <chrono>
 #include <thread>
 #include <csignal>
+#include <random>
+#include <fstream>
 
 class KalmanFilter {
 public:
@@ -40,6 +42,18 @@ private:
 
 const char *k4a_library_path = "/usr/lib/x86_64-linux-gnu/libk4a.so";
 volatile bool keep_running = true;
+ros::Time marker_creation_time;
+geometry_msgs::Point marker_position;
+std::ofstream times_file("times.txt");
+std::ofstream dist_file("distances.txt");
+
+float random_float(float min, float max)
+{
+    float random = ((float) rand()) / (float) RAND_MAX;
+    float diff = max - min;
+    float r = random * diff;
+    return ((r > min + 0.1 || r < min - 0.1) ? (min + r) : (min + 0.1));
+}
 
 void signal_handler(int signal)
 {
@@ -57,30 +71,6 @@ k4a_float3_t transform_coordinates(const k4a_float3_t &point, const k4a_float3_t
     new_coords.xyz.z = -(point.xyz.y - spine_base.xyz.y) / 1000.0 * 1.5; // Convert to meters, negate, and scale
     return new_coords;
 }
-
-
-double calculate_hand_openness(const k4abt_skeleton_t &skeleton, KalmanFilter &kf_hand_openness)
-{
-    k4a_float3_t left_handtip_joint = skeleton.joints[K4ABT_JOINT_HANDTIP_LEFT].position;
-    k4a_float3_t left_thumb_joint = skeleton.joints[K4ABT_JOINT_THUMB_LEFT].position;
-
-    // distance between handtip and thumb
-    double dist = sqrt(pow(left_handtip_joint.xyz.x - left_thumb_joint.xyz.x, 2) +
-                       pow(left_handtip_joint.xyz.y - left_thumb_joint.xyz.y, 2) +
-                       pow(left_handtip_joint.xyz.z - left_thumb_joint.xyz.z, 2));
-
-    double max_distance = 180.00;
-    double raw_openness = dist / max_distance - 0.2;
-
-    // Clamping
-    double openness = std::max(0.0, std::min(1.0, raw_openness));
-
-    // Use Kalman filter to smooth the openness value
-    double smoothed_openness = kf_hand_openness.update(openness);
-
-    return smoothed_openness;
-}
-
 
 uint32_t update_kinect(k4a_device_t device, k4abt_tracker_t bodyTracker, k4abt_frame_t &body_frame)
 {
@@ -102,13 +92,13 @@ uint32_t update_kinect(k4a_device_t device, k4abt_tracker_t bodyTracker, k4abt_f
     return 0;
 }
 
-visualization_msgs::Marker create_marker(const geometry_msgs::Point &position)
+visualization_msgs::Marker create_marker(const geometry_msgs::Point &position, int id)
 {
     visualization_msgs::Marker marker;
     marker.header.frame_id = "panda_link0";
     marker.header.stamp = ros::Time::now();
     marker.ns = "kinect_target";
-    marker.id = 0;
+    marker.id = id;
     marker.type = visualization_msgs::Marker::SPHERE;
     marker.action = visualization_msgs::Marker::ADD;
     marker.pose.position = position;
@@ -127,9 +117,23 @@ visualization_msgs::Marker create_marker(const geometry_msgs::Point &position)
     return marker;
 }
 
+visualization_msgs::Marker create_random_marker()
+{
+    marker_position.x = random_float(0.0, 0.8);  // only positive values for x-coordinate
+    marker_position.y = random_float(-0.8, 0.8); 
+    marker_position.z = random_float(0.1, 0.8);  // minimum 10cm from the ground
+
+    marker_creation_time = ros::Time::now();
+
+    return create_marker(marker_position, 1);  // Set the ID of the random marker to 1
+}
+
+
+
 int main(int argc, char **argv)
 {
 std::signal(SIGINT, signal_handler);
+srand(time(NULL));
 
 // Initialize Kinect and MoveIt libraries
 k4a_device_configuration_t device_config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
@@ -153,7 +157,6 @@ double measurement_noise = 0.1;
 KalmanFilter kf_x(process_noise, measurement_noise, 0.0);
 KalmanFilter kf_y(process_noise, measurement_noise, 0.0);
 KalmanFilter kf_z(process_noise, measurement_noise, 0.0);
-KalmanFilter kf_hand_openness(process_noise, 0.03, 0.0);
 
 k4abt_tracker_t bodyTracker;
 k4a_calibration_t calibration;
@@ -169,7 +172,9 @@ spinner.start();
 
 moveit::planning_interface::MoveGroupInterface arm("panda_arm");
 moveit::planning_interface::MoveGroupInterface::Plan my_plan;
-moveit::planning_interface::MoveGroupInterface gripper("panda_hand");
+
+visualization_msgs::Marker marker = create_random_marker();
+marker_pub.publish(marker);
 
 std::vector<geometry_msgs::Pose> waypoints;
 
@@ -187,28 +192,42 @@ while (ros::ok() && keep_running)
 
         k4a_float3_t left_wrist_ros = transform_coordinates(left_wrist_joint, spine_base);
 
-        // Inside the main loop
-        double hand_openness = calculate_hand_openness(skeleton, kf_hand_openness);
-        std::cout << "Left Hand Openness: " << hand_openness << std::endl;
-
-        std::vector<double> joint_values = {hand_openness * 0.04, hand_openness * 0.04};
-
-        gripper.setJointValueTarget(joint_values);
-        gripper.move();
-
         geometry_msgs::Point left_wrist_position;
         left_wrist_position.x = kf_x.update(left_wrist_ros.xyz.x);
         left_wrist_position.y = kf_y.update(left_wrist_ros.xyz.y);
         left_wrist_position.z = kf_z.update(left_wrist_ros.xyz.z);
 
         // Print the current position
-        std::cout << "Left Wrist ROS Coordinates: x=" << left_wrist_position.x
-                  << " y=" << left_wrist_position.y
-                  << " z=" << left_wrist_position.z << std::endl;
+        //std::cout << "Left Wrist ROS Coordinates: x=" << left_wrist_position.x
+        //          << " y=" << left_wrist_position.y
+        //          << " z=" << left_wrist_position.z << std::endl;
 
         // Create and publish the 3D ball marker at the wrist position
-        visualization_msgs::Marker marker = create_marker(left_wrist_position);
-        marker_pub.publish(marker);
+        visualization_msgs::Marker wrist_marker = create_marker(left_wrist_position, 0);
+        marker_pub.publish(wrist_marker);
+
+
+
+        // Compute the distance to the marker
+            double dist_to_marker = sqrt(pow(left_wrist_position.x - marker_position.x, 2)
+                                         + pow(left_wrist_position.y - marker_position.y, 2)
+                                         + pow(left_wrist_position.z - marker_position.z, 2));
+
+            std::cout << "Current Distance to Marker: " << dist_to_marker << std::endl;
+            dist_file << dist_to_marker << "\n";
+            // Check if the hand is within 0.10m of the marker
+            if (dist_to_marker <= 0.10)
+            {
+                // Record the time between the creation of the marker and the current time
+                double elapsed_time = (ros::Time::now() - marker_creation_time).toSec();
+
+                // Write the elapsed time to the file
+                times_file << elapsed_time << std::endl;
+
+                // Create a new random marker
+                marker = create_random_marker();
+                marker_pub.publish(marker);
+            }
 
          // Update the target pose of the robot arm
         geometry_msgs::Pose target_pose;
@@ -233,6 +252,8 @@ while (ros::ok() && keep_running)
 
 }
 // Cleanup
+times_file.close();
+dist_file.close();
 k4abt_tracker_shutdown(bodyTracker);
 k4abt_tracker_destroy(bodyTracker);
 k4a_device_stop_cameras(device);
